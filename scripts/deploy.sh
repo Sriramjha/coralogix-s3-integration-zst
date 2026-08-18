@@ -17,6 +17,8 @@ set -euo pipefail
 #   --application-name s3-zst
 #   --subsystem-name logs
 #   --secret-arn arn:aws:secretsmanager:...
+#   --include-patterns '*.zst,*.zstd'
+#   --exclude-patterns '*/tmp/*,*_debug.zst'
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 STACK_NAME="coralogix-s3-integration-zst"
@@ -27,6 +29,8 @@ SUBSYSTEM_NAME="logs"
 CORALOGIX_KEY=""
 SECRET_ARN=""
 KMS_ARN=""
+INCLUDE_PATTERNS=""
+EXCLUDE_PATTERNS=""
 
 usage() {
   sed -n '3,20p' "$0"
@@ -47,6 +51,8 @@ while [[ $# -gt 0 ]]; do
     --application-name) APPLICATION_NAME="$2"; shift 2 ;;
     --subsystem-name) SUBSYSTEM_NAME="$2"; shift 2 ;;
     --code-key) CODE_KEY="$2"; shift 2 ;;
+    --include-patterns) INCLUDE_PATTERNS="$2"; shift 2 ;;
+    --exclude-patterns) EXCLUDE_PATTERNS="$2"; shift 2 ;;
     -h|--help) usage ;;
     *) echo "Unknown argument: $1" >&2; usage ;;
   esac
@@ -91,6 +97,12 @@ if [[ -n "${SECRET_ARN}" ]]; then
 fi
 if [[ -n "${KMS_ARN}" ]]; then
   PARAMS+=("S3BucketKmsKeyArn=${KMS_ARN}")
+fi
+if [[ -n "${INCLUDE_PATTERNS}" ]]; then
+  PARAMS+=("S3KeyIncludePatterns=${INCLUDE_PATTERNS}")
+fi
+if [[ -n "${EXCLUDE_PATTERNS}" ]]; then
+  PARAMS+=("S3KeyExcludePatterns=${EXCLUDE_PATTERNS}")
 fi
 
 echo "Deploying CloudFormation stack ${STACK_NAME}..."

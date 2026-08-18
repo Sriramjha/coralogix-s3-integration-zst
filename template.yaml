@@ -16,6 +16,16 @@ Parameters:
     Default: ""
     Description: Optional KMS key ARN if the S3 bucket uses SSE-KMS
 
+  S3KeyIncludePatterns:
+    Type: String
+    Default: "*.zst,*.zstd"
+    Description: Comma-separated include patterns for S3 keys (shell wildcards).
+
+  S3KeyExcludePatterns:
+    Type: String
+    Default: ""
+    Description: Comma-separated exclude patterns. Matching keys are skipped.
+
   CoralogixDomain:
     Type: String
     Default: eu1.coralogix.com
@@ -100,7 +110,8 @@ Resources:
             - !Ref AWS::NoValue
           CORALOGIX_BATCH_SIZE: "200"
           CORALOGIX_MAX_BATCH_BYTES: "1500000"
-          S3_KEY_SUFFIXES: ".zst,.zstd"
+          S3_KEY_INCLUDE_PATTERNS: !Ref S3KeyIncludePatterns
+          S3_KEY_EXCLUDE_PATTERNS: !Ref S3KeyExcludePatterns
           LOG_LEVEL: INFO
       Policies:
         - Statement:

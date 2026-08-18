@@ -95,11 +95,38 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(handler.extract_timestamp_ms(records[0]), expected)
 
 
-class SuffixFilterTests(unittest.TestCase):
-    def test_default_allows_zst(self) -> None:
-        os.environ.pop("S3_KEY_SUFFIXES", None)
-        self.assertTrue(handler.suffix_allowed("a/b.json.zst"))
-        self.assertFalse(handler.suffix_allowed("a/b.json.gz"))
+class KeyPatternTests(unittest.TestCase):
+    def setUp(self) -> None:
+        for name in (
+            "S3_KEY_INCLUDE_PATTERNS",
+            "S3_KEY_EXCLUDE_PATTERNS",
+            "S3_KEY_SUFFIXES",
+        ):
+            os.environ.pop(name, None)
+
+    def test_default_allows_zst_only(self) -> None:
+        self.assertTrue(handler.key_allowed("a/b.json.zst"))
+        self.assertTrue(handler.key_allowed("events.zstd"))
+        self.assertFalse(handler.key_allowed("a/b.json.gz"))
+        self.assertFalse(handler.key_allowed("readme.txt"))
+
+    def test_include_prefix_pattern(self) -> None:
+        os.environ["S3_KEY_INCLUDE_PATTERNS"] = "raw/*/*.zst"
+        self.assertTrue(handler.key_allowed("raw/2026/events.zst"))
+        self.assertFalse(handler.key_allowed("other/2026/events.zst"))
+
+    def test_exclude_wins_over_include(self) -> None:
+        os.environ["S3_KEY_INCLUDE_PATTERNS"] = "*.zst"
+        os.environ["S3_KEY_EXCLUDE_PATTERNS"] = "*/tmp/*,*_debug.zst"
+        self.assertTrue(handler.key_allowed("raw/events.zst"))
+        self.assertFalse(handler.key_allowed("raw/tmp/events.zst"))
+        self.assertFalse(handler.key_allowed("raw/events_debug.zst"))
+
+    def test_star_include_allows_all_except_exclude(self) -> None:
+        os.environ["S3_KEY_INCLUDE_PATTERNS"] = "*"
+        os.environ["S3_KEY_EXCLUDE_PATTERNS"] = "*.metadata.zst"
+        self.assertTrue(handler.key_allowed("notes.txt"))
+        self.assertFalse(handler.key_allowed("file.metadata.zst"))
 
 
 if __name__ == "__main__":

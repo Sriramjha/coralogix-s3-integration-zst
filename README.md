@@ -43,7 +43,9 @@ aws cloudformation deploy \
     CoralogixDomain=eu1.coralogix.com \
     CoralogixApplicationName=s3-zst \
     CoralogixSubsystemName=logs \
-    CoralogixSendYourDataKey=YOUR_SEND_YOUR_DATA_KEY
+    CoralogixSendYourDataKey=YOUR_SEND_YOUR_DATA_KEY \
+    S3KeyIncludePatterns='*.zst,*.zstd' \
+    S3KeyExcludePatterns='*/tmp/*,*/test/*,*_debug.zst'
 ```
 
 Or use the helper (build + upload + deploy):
@@ -65,6 +67,28 @@ If the log bucket uses SSE-KMS, add `S3BucketKmsKeyArn=arn:aws:kms:...`.
 To keep the API key out of stack parameters, store it in Secrets Manager and pass `CoralogixApiKeySecretArn` instead of `CoralogixSendYourDataKey`. The secret can be a raw string or JSON with `CORALOGIX_SEND_YOUR_DATA_KEY`.
 
 If a Coralogix native Lambda is already subscribed to the same SNS topic, unsubscribe it so you do not ingest unreadable compressed bytes twice.
+
+### Include and exclude patterns
+
+Patterns are comma-separated shell wildcards (`*`, `?`, `[seq]`) matched against the full S3 key and the filename. **Exclude wins.**
+
+```bash
+# Only Adaptive Shield raw events, skip test/debug objects
+S3KeyIncludePatterns='*.zst,*.zstd,raw/*/*.zst'
+S3KeyExcludePatterns='*/tmp/*,*/test/*,*_debug.zst,*.metadata.zst'
+```
+
+| Example include | Matches |
+| --- | --- |
+| `*.zst,*.zstd` | Any key ending in those suffixes (default) |
+| `raw/*/*.zst` | `raw/2026/events.zst`, not `other/events.zst` |
+| `*` | Every object the SNS notification delivers |
+
+| Example exclude | Skips |
+| --- | --- |
+| `*/tmp/*` | `adaptive/tmp/file.zst` |
+| `*_debug.zst` | `events_debug.zst` |
+| `test/*,*.metadata.zst` | test prefix or metadata sidecars |
 
 ## What the stack creates
 
@@ -90,7 +114,8 @@ If a Coralogix native Lambda is already subscribed to the same SNS topic, unsubs
 | `CoralogixSendYourDataKey` | one of key/secret | | Send-Your-Data API key |
 | `CoralogixApiKeySecretArn` | one of key/secret | | Secrets Manager ARN |
 | `S3BucketKmsKeyArn` | | empty | KMS key if the log bucket is SSE-KMS |
-| `S3KeySuffixes` | | `.zst,.zstd` | Only process matching keys |
+| `S3KeyIncludePatterns` | | `*.zst,*.zstd` | Comma-separated shell wildcards. Key must match at least one. Use `*` for all keys. |
+| `S3KeyExcludePatterns` | | empty | Comma-separated shell wildcards. Matching keys are skipped even if included. |
 | `LambdaMemoryMb` | | `1024` | Raise for large files |
 | `LambdaTimeoutSeconds` | | `300` | 5 minutes |
 

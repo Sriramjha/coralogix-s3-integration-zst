@@ -11,6 +11,7 @@ to the Coralogix Logs API.
 
 from __future__ import annotations
 
+import fnmatch
 import gzip
 import io
 import json
@@ -427,12 +428,62 @@ def decode_s3_key(key: str) -> str:
     return urllib.parse.unquote_plus(key)
 
 
+def include_patterns() -> List[str]:
+    patterns = env_csv("S3_KEY_INCLUDE_PATTERNS", ["*.zst", "*.zstd"])
+    for suffix in env_csv("S3_KEY_SUFFIXES", []):
+        if suffix.startswith("*"):
+            patterns.append(suffix)
+        else:
+            patterns.append(f"*{suffix}")
+    # Preserve order, drop duplicates
+    seen = set()
+    unique: List[str] = []
+    for pattern in patterns:
+        key = pattern.lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(pattern)
+    return unique
+
+
+def exclude_patterns() -> List[str]:
+    return env_csv("S3_KEY_EXCLUDE_PATTERNS", [])
+
+
+def _matches_pattern(key: str, pattern: str) -> bool:
+    """Shell-style match on the full key and the basename. Case-insensitive."""
+    name = key.rsplit("/", 1)[-1]
+    key_l, name_l, pat_l = key.lower(), name.lower(), pattern.lower()
+    return bool(
+        fnmatch.fnmatch(key_l, pat_l)
+        or fnmatch.fnmatch(name_l, pat_l)
+        or fnmatch.fnmatch(f"/{key_l}", pat_l)
+    )
+
+
+def matches_any_pattern(key: str, patterns: List[str]) -> bool:
+    return any(_matches_pattern(key, pattern) for pattern in patterns)
+
+
+def key_allowed(key: str) -> bool:
+    """
+    Include/exclude filter for S3 keys.
+
+    Exclude wins. Empty include list means "all keys".
+    Defaults include ``*.zst`` and ``*.zstd``.
+    """
+    excluded = exclude_patterns()
+    if excluded and matches_any_pattern(key, excluded):
+        return False
+    included = include_patterns()
+    if included and not matches_any_pattern(key, included):
+        return False
+    return True
+
+
 def suffix_allowed(key: str) -> bool:
-    suffixes = env_csv("S3_KEY_SUFFIXES", [".zst", ".zstd"])
-    if not suffixes:
-        return True
-    lower = key.lower()
-    return any(lower.endswith(suffix.lower()) for suffix in suffixes)
+    """Backward-compatible alias for key_allowed()."""
+    return key_allowed(key)
 
 
 def extract_s3_objects(event: Dict[str, Any]) -> List[Tuple[str, str]]:
@@ -507,8 +558,14 @@ def _from_sns_message(message: Any) -> List[Tuple[str, str]]:
 def process_object(
     s3_client: Any, shipper: CoralogixShipper, bucket: str, key: str
 ) -> int:
-    if not suffix_allowed(key):
-        LOGGER.info("Skipping s3://%s/%s (suffix filter)", bucket, key)
+    if not key_allowed(key):
+        LOGGER.info(
+            "Skipping s3://%s/%s (include=%s exclude=%s)",
+            bucket,
+            key,
+            include_patterns() or ["*"],
+            exclude_patterns() or ["-"],
+        )
         return 0
 
     LOGGER.info("Reading s3://%s/%s", bucket, key)

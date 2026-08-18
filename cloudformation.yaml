@@ -10,7 +10,8 @@ Metadata:
           - SnsTopicArn
           - S3BucketName
           - S3BucketKmsKeyArn
-          - S3KeySuffixes
+          - S3KeyIncludePatterns
+          - S3KeyExcludePatterns
       - Label:
           default: Lambda package
         Parameters:
@@ -36,6 +37,10 @@ Metadata:
         default: SNS topic ARN (S3 event notification)
       S3BucketName:
         default: Source S3 bucket
+      S3KeyIncludePatterns:
+        default: Include patterns for .zst keys
+      S3KeyExcludePatterns:
+        default: Exclude patterns for .zst keys
       LambdaCodeS3Bucket:
         default: Artifact bucket for lambda.zip
       CoralogixSendYourDataKey:
@@ -58,10 +63,20 @@ Parameters:
     Default: ""
     Description: Optional KMS key ARN if the source bucket uses SSE-KMS.
 
-  S3KeySuffixes:
+  S3KeyIncludePatterns:
     Type: String
-    Default: ".zst,.zstd"
-    Description: Comma-separated object suffixes to process. Empty = all keys.
+    Default: "*.zst,*.zstd"
+    Description: >
+      Comma-separated shell-style include patterns matched against the S3 key
+      and filename (e.g. *.zst, raw/*/*.zst, events/*.zstd). Use * to include all
+      keys. Exclude patterns are applied after include.
+
+  S3KeyExcludePatterns:
+    Type: String
+    Default: ""
+    Description: >
+      Comma-separated shell-style exclude patterns. Matching keys are skipped
+      even if they matched include (e.g. */tmp/*, *_debug.zst, test/*).
 
   LambdaCodeS3Bucket:
     Type: String
@@ -240,7 +255,8 @@ Resources:
             - !Ref AWS::NoValue
           CORALOGIX_BATCH_SIZE: !Ref CoralogixBatchSize
           CORALOGIX_MAX_BATCH_BYTES: "1500000"
-          S3_KEY_SUFFIXES: !Ref S3KeySuffixes
+          S3_KEY_INCLUDE_PATTERNS: !Ref S3KeyIncludePatterns
+          S3_KEY_EXCLUDE_PATTERNS: !Ref S3KeyExcludePatterns
           LOG_LEVEL: INFO
       Tags:
         - Key: Application
