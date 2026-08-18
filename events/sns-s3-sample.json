@@ -1,0 +1,22 @@
+{
+  "Records": [
+    {
+      "EventSource": "aws:sns",
+      "EventVersion": "1.0",
+      "EventSubscriptionArn": "arn:aws:sns:us-east-1:123456789012:adaptive-shield-s3:example",
+      "Sns": {
+        "Type": "Notification",
+        "MessageId": "00000000-0000-0000-0000-000000000000",
+        "TopicArn": "arn:aws:sns:us-east-1:123456789012:adaptive-shield-s3",
+        "Subject": "Amazon S3 Notification",
+        "Message": "{\"Records\":[{\"eventVersion\":\"2.1\",\"eventSource\":\"aws:s3\",\"awsRegion\":\"us-east-1\",\"eventTime\":\"2026-08-18T06:00:00.000Z\",\"eventName\":\"ObjectCreated:Put\",\"s3\":{\"s3SchemaVersion\":\"1.0\",\"configurationId\":\"adaptive-shield\",\"bucket\":{\"name\":\"adaptive-shield-raw-events\",\"arn\":\"arn:aws:s3:::adaptive-shield-raw-events\"},\"object\":{\"key\":\"raw/2026/08/18/events.json.zst\",\"size\":1234}}}]}",
+        "Timestamp": "2026-08-18T06:00:00.000Z",
+        "SignatureVersion": "1",
+        "Signature": "example",
+        "SigningCertUrl": "https://sns.us-east-1.amazonaws.com/cert.pem",
+        "UnsubscribeUrl": "https://sns.us-east-1.amazonaws.com/?Action=Unsubscribe",
+        "MessageAttributes": {}
+      }
+    }
+  ]
+}

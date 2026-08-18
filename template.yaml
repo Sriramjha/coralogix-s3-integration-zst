@@ -1,0 +1,152 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Coralogix S3 Integration for .zst logs (SAM alternative to cloudformation.yaml)
+
+Parameters:
+  SnsTopicArn:
+    Type: String
+    Description: Existing SNS topic that receives S3 object-created notifications
+
+  S3BucketName:
+    Type: String
+    Description: Adaptive Shield S3 bucket name (used for IAM GetObject)
+
+  S3BucketKmsKeyArn:
+    Type: String
+    Default: ""
+    Description: Optional KMS key ARN if the S3 bucket uses SSE-KMS
+
+  CoralogixDomain:
+    Type: String
+    Default: eu1.coralogix.com
+    Description: Coralogix domain, e.g. eu1.coralogix.com, coralogix.in, cx498.coralogix.com
+
+  CoralogixApplicationName:
+    Type: String
+    Default: s3-zst
+
+  CoralogixSubsystemName:
+    Type: String
+    Default: logs
+
+  CoralogixSendYourDataKey:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Send-Your-Data API key. Leave empty if using CoralogixApiKeySecretArn.
+
+  CoralogixApiKeySecretArn:
+    Type: String
+    Default: ""
+    Description: Optional Secrets Manager ARN holding the Send-Your-Data key
+
+  LambdaMemoryMb:
+    Type: Number
+    Default: 1024
+    MinValue: 256
+    MaxValue: 10240
+
+  LambdaTimeoutSeconds:
+    Type: Number
+    Default: 300
+    MinValue: 30
+    MaxValue: 900
+
+Conditions:
+  HasKmsKey: !Not [!Equals [!Ref S3BucketKmsKeyArn, ""]]
+  HasSecretArn: !Not [!Equals [!Ref CoralogixApiKeySecretArn, ""]]
+  HasInlineKey: !Not [!Equals [!Ref CoralogixSendYourDataKey, ""]]
+
+Rules:
+  MustProvideCoralogixKey:
+    Assertions:
+      - Assert: !Not
+          - !And
+            - !Equals [!Ref CoralogixSendYourDataKey, ""]
+            - !Equals [!Ref CoralogixApiKeySecretArn, ""]
+        AssertDescription: Provide CoralogixSendYourDataKey or CoralogixApiKeySecretArn
+
+Resources:
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-dlq"
+      MessageRetentionPeriod: 1209600
+
+  AdaptiveShieldShipperFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-shipper"
+      Description: Decompress Adaptive Shield .zst objects and ship logs to Coralogix
+      Runtime: python3.12
+      Architectures:
+        - x86_64
+      Handler: handler.lambda_handler
+      CodeUri: src/
+      Timeout: !Ref LambdaTimeoutSeconds
+      MemorySize: !Ref LambdaMemoryMb
+      Environment:
+        Variables:
+          CORALOGIX_DOMAIN: !Ref CoralogixDomain
+          CORALOGIX_APPLICATION_NAME: !Ref CoralogixApplicationName
+          CORALOGIX_SUBSYSTEM_NAME: !Ref CoralogixSubsystemName
+          CORALOGIX_SEND_YOUR_DATA_KEY: !If
+            - HasInlineKey
+            - !Ref CoralogixSendYourDataKey
+            - !Ref AWS::NoValue
+          CORALOGIX_API_KEY_SECRET_ARN: !If
+            - HasSecretArn
+            - !Ref CoralogixApiKeySecretArn
+            - !Ref AWS::NoValue
+          CORALOGIX_BATCH_SIZE: "200"
+          CORALOGIX_MAX_BATCH_BYTES: "1500000"
+          S3_KEY_SUFFIXES: ".zst,.zstd"
+          LOG_LEVEL: INFO
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource: !Sub "arn:${AWS::Partition}:s3:::${S3BucketName}/*"
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+              Resource: !GetAtt DeadLetterQueue.Arn
+        - !If
+          - HasKmsKey
+          - Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                Resource: !Ref S3BucketKmsKeyArn
+          - !Ref AWS::NoValue
+        - !If
+          - HasSecretArn
+          - Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref CoralogixApiKeySecretArn
+          - !Ref AWS::NoValue
+      Events:
+        SnsEvent:
+          Type: SNS
+          Properties:
+            Topic: !Ref SnsTopicArn
+      EventInvokeConfig:
+        MaximumRetryAttempts: 2
+        DestinationConfig:
+          OnFailure:
+            Type: SQS
+            Destination: !GetAtt DeadLetterQueue.Arn
+
+Outputs:
+  FunctionName:
+    Value: !Ref AdaptiveShieldShipperFunction
+  FunctionArn:
+    Value: !GetAtt AdaptiveShieldShipperFunction.Arn
+  DeadLetterQueueUrl:
+    Value: !Ref DeadLetterQueue
+  DeadLetterQueueArn:
+    Value: !GetAtt DeadLetterQueue.Arn

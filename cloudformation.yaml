@@ -1,0 +1,296 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Coralogix S3 Integration for .zst logs — SNS-triggered Lambda that decompresses Zstandard objects from S3 and ships events to Coralogix.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: S3 and SNS
+        Parameters:
+          - SnsTopicArn
+          - S3BucketName
+          - S3BucketKmsKeyArn
+          - S3KeySuffixes
+      - Label:
+          default: Lambda package
+        Parameters:
+          - LambdaCodeS3Bucket
+          - LambdaCodeS3Key
+      - Label:
+          default: Coralogix
+        Parameters:
+          - CoralogixDomain
+          - CoralogixApplicationName
+          - CoralogixSubsystemName
+          - CoralogixSendYourDataKey
+          - CoralogixApiKeySecretArn
+          - CoralogixBatchSize
+      - Label:
+          default: Lambda sizing
+        Parameters:
+          - LambdaMemoryMb
+          - LambdaTimeoutSeconds
+          - LogRetentionDays
+    ParameterLabels:
+      SnsTopicArn:
+        default: SNS topic ARN (S3 event notification)
+      S3BucketName:
+        default: Source S3 bucket
+      LambdaCodeS3Bucket:
+        default: Artifact bucket for lambda.zip
+      CoralogixSendYourDataKey:
+        default: Send-Your-Data API key
+      CoralogixApiKeySecretArn:
+        default: Secrets Manager ARN (optional)
+
+Parameters:
+  SnsTopicArn:
+    Type: String
+    Description: Existing SNS topic that receives S3 object-created notifications.
+
+  S3BucketName:
+    Type: String
+    Description: S3 bucket that stores the .zst log files (IAM GetObject scope).
+    AllowedPattern: "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+
+  S3BucketKmsKeyArn:
+    Type: String
+    Default: ""
+    Description: Optional KMS key ARN if the source bucket uses SSE-KMS.
+
+  S3KeySuffixes:
+    Type: String
+    Default: ".zst,.zstd"
+    Description: Comma-separated object suffixes to process. Empty = all keys.
+
+  LambdaCodeS3Bucket:
+    Type: String
+    Description: Bucket that holds the deployment zip from scripts/package.sh.
+    AllowedPattern: "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+
+  LambdaCodeS3Key:
+    Type: String
+    Default: coralogix-s3-integration-zst/lambda.zip
+    Description: S3 key of the Lambda deployment zip.
+
+  CoralogixDomain:
+    Type: String
+    Default: eu1.coralogix.com
+    Description: Coralogix domain (eu1.coralogix.com, coralogix.in, cx498.coralogix.com, ...).
+
+  CoralogixApplicationName:
+    Type: String
+    Default: s3-zst
+    Description: Coralogix application name.
+
+  CoralogixSubsystemName:
+    Type: String
+    Default: logs
+    Description: Coralogix subsystem name.
+
+  CoralogixSendYourDataKey:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Send-Your-Data API key. Leave empty if CoralogixApiKeySecretArn is set.
+
+  CoralogixApiKeySecretArn:
+    Type: String
+    Default: ""
+    Description: Optional Secrets Manager ARN. Secret may be a raw key or JSON with CORALOGIX_SEND_YOUR_DATA_KEY.
+
+  CoralogixBatchSize:
+    Type: Number
+    Default: 200
+    MinValue: 1
+    MaxValue: 2000
+    Description: Max events per Coralogix HTTP POST.
+
+  LambdaMemoryMb:
+    Type: Number
+    Default: 1024
+    MinValue: 256
+    MaxValue: 10240
+    Description: Lambda memory (MB). Raise this for large decompressed files.
+
+  LambdaTimeoutSeconds:
+    Type: Number
+    Default: 300
+    MinValue: 30
+    MaxValue: 900
+    Description: Lambda timeout (seconds).
+
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+    Description: CloudWatch Logs retention for the shipper.
+
+Conditions:
+  HasKmsKey: !Not [!Equals [!Ref S3BucketKmsKeyArn, ""]]
+  HasSecretArn: !Not [!Equals [!Ref CoralogixApiKeySecretArn, ""]]
+  HasInlineKey: !Not [!Equals [!Ref CoralogixSendYourDataKey, ""]]
+
+Rules:
+  MustProvideCoralogixKey:
+    Assertions:
+      - Assert: !Not
+          - !And
+            - !Equals [!Ref CoralogixSendYourDataKey, ""]
+            - !Equals [!Ref CoralogixApiKeySecretArn, ""]
+        AssertDescription: Provide CoralogixSendYourDataKey or CoralogixApiKeySecretArn.
+
+Resources:
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-dlq"
+      MessageRetentionPeriod: 1209600
+      Tags:
+        - Key: Application
+          Value: Coralogix S3 Integration for .zst logs
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-zst-shipper"
+      RetentionInDays: !Ref LogRetentionDays
+
+  ShipperRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-zst-shipper-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: s3-read-and-dlq
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${S3BucketName}/*"
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt DeadLetterQueue.Arn
+        - !If
+          - HasKmsKey
+          - PolicyName: kms-decrypt
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - kms:Decrypt
+                    - kms:DescribeKey
+                  Resource: !Ref S3BucketKmsKeyArn
+          - !Ref AWS::NoValue
+        - !If
+          - HasSecretArn
+          - PolicyName: secrets-read
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - secretsmanager:GetSecretValue
+                  Resource: !Ref CoralogixApiKeySecretArn
+          - !Ref AWS::NoValue
+      Tags:
+        - Key: Application
+          Value: Coralogix S3 Integration for .zst logs
+
+  ShipperFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: LogGroup
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-zst-shipper"
+      Description: Coralogix S3 Integration for .zst logs
+      Runtime: python3.12
+      Architectures:
+        - x86_64
+      Handler: handler.lambda_handler
+      MemorySize: !Ref LambdaMemoryMb
+      Timeout: !Ref LambdaTimeoutSeconds
+      Role: !GetAtt ShipperRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref LambdaCodeS3Key
+      Environment:
+        Variables:
+          CORALOGIX_DOMAIN: !Ref CoralogixDomain
+          CORALOGIX_APPLICATION_NAME: !Ref CoralogixApplicationName
+          CORALOGIX_SUBSYSTEM_NAME: !Ref CoralogixSubsystemName
+          CORALOGIX_SEND_YOUR_DATA_KEY: !If
+            - HasInlineKey
+            - !Ref CoralogixSendYourDataKey
+            - !Ref AWS::NoValue
+          CORALOGIX_API_KEY_SECRET_ARN: !If
+            - HasSecretArn
+            - !Ref CoralogixApiKeySecretArn
+            - !Ref AWS::NoValue
+          CORALOGIX_BATCH_SIZE: !Ref CoralogixBatchSize
+          CORALOGIX_MAX_BATCH_BYTES: "1500000"
+          S3_KEY_SUFFIXES: !Ref S3KeySuffixes
+          LOG_LEVEL: INFO
+      Tags:
+        - Key: Application
+          Value: Coralogix S3 Integration for .zst logs
+
+  EventInvokeConfig:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      FunctionName: !Ref ShipperFunction
+      Qualifier: "$LATEST"
+      MaximumRetryAttempts: 2
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt DeadLetterQueue.Arn
+
+  SnsInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ShipperFunction
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref SnsTopicArn
+
+  SnsSubscription:
+    Type: AWS::SNS::Subscription
+    DependsOn: SnsInvokePermission
+    Properties:
+      Protocol: lambda
+      TopicArn: !Ref SnsTopicArn
+      Endpoint: !GetAtt ShipperFunction.Arn
+
+Outputs:
+  StackName:
+    Description: CloudFormation stack name
+    Value: !Ref AWS::StackName
+  FunctionName:
+    Description: Lambda function name
+    Value: !Ref ShipperFunction
+  FunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt ShipperFunction.Arn
+  DeadLetterQueueUrl:
+    Description: SQS DLQ for failed invocations
+    Value: !Ref DeadLetterQueue
+  DeadLetterQueueArn:
+    Description: SQS DLQ ARN
+    Value: !GetAtt DeadLetterQueue.Arn
+  LogGroupName:
+    Description: CloudWatch log group
+    Value: !Ref LogGroup
+  Integration:
+    Description: Integration name
+    Value: Coralogix S3 Integration for .zst logs

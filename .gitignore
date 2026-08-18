@@ -1,0 +1,11 @@
+.aws-sam/
+build/
+dist/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+lambda.zip
+.env
+packaged.yaml
